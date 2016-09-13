@@ -14,10 +14,11 @@
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/proc_fs.h>
-#include <linux/smp_lock.h>
+// #include <linux/smp_lock.h>
 #include <asm/uaccess.h>
 #include <linux/interrupt.h>
 #include <linux/mutex.h>
+#include <linux/sched.h>
 
 #define TRUE 1
 #define FALSE 0
@@ -58,9 +59,10 @@ static wait_queue_head_t wait_queue;
 
 static kvm_ivshmem_device kvm_ivshmem_dev;
 
-static int device_major_nr;
+static int device_major_nr=0;
 
-static int kvm_ivshmem_ioctl(struct inode *, struct file *, unsigned int, unsigned long);
+//static int kvm_ivshmem_ioctl(struct inode *, struct file *, unsigned int, unsigned long);
+static long kvm_ivshmem_unlocked_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
 static int kvm_ivshmem_mmap(struct file *, struct vm_area_struct *);
 static int kvm_ivshmem_open(struct inode *, struct file *);
 static int kvm_ivshmem_release(struct inode *, struct file *);
@@ -75,7 +77,7 @@ static const struct file_operations kvm_ivshmem_ops = {
 	.open	= kvm_ivshmem_open,
 	.mmap	= kvm_ivshmem_mmap,
 	.read	= kvm_ivshmem_read,
-	.ioctl   = kvm_ivshmem_ioctl,
+	.unlocked_ioctl   = kvm_ivshmem_unlocked_ioctl, /* compat_ioctl? https://lwn.net/Articles/119652/ */
 	.write   = kvm_ivshmem_write,
 	.llseek  = kvm_ivshmem_lseek,
 	.release = kvm_ivshmem_release,
@@ -98,14 +100,15 @@ static struct pci_driver kvm_ivshmem_pci_driver = {
 	.remove	  = kvm_ivshmem_remove_device,
 };
 
-static int kvm_ivshmem_ioctl(struct inode * ino, struct file * filp,
-			unsigned int cmd, unsigned long arg)
+//static int kvm_ivshmem_ioctl(struct inode * ino, struct file * filp,
+//			unsigned int cmd, unsigned long arg)
+static long kvm_ivshmem_unlocked_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 
 	int rv;
 	uint32_t msg;
 
-	printk("KVM_IVSHMEM: args is %ld\n", arg);
+	printk("KVM_IVSHMEM: cmd=%d, args=%ld\n", cmd, arg);
 #if 1
 	switch (cmd) {
 		case set_sema:
@@ -132,13 +135,13 @@ static int kvm_ivshmem_ioctl(struct inode * ino, struct file * filp,
 			break;
 		case wait_event_irq:
 			msg = ((arg & 0xff) << 8) + (cmd & 0xff);
-			printk("KVM_IVSHMEM: ringing wait_event doorbell on %d (msg = %d)\n", arg, msg);
+			printk("KVM_IVSHMEM: ringing wait_event doorbell on %lu (msg = %d)\n", arg, msg);
 			writel(msg, kvm_ivshmem_dev.regs + Doorbell);
 			break;
 		case read_ivposn:
 			msg = readl( kvm_ivshmem_dev.regs + IVPosition);
 			printk("KVM_IVSHMEM: my posn is %d\n", msg);
-			rv = copy_to_user(arg, &msg, sizeof(msg));
+			rv = copy_to_user((void*)arg, &msg, sizeof(msg));
 			break;
 		case sema_irq:
 			// 2 is the actual code, but we use 7 from the user
@@ -148,7 +151,7 @@ static int kvm_ivshmem_ioctl(struct inode * ino, struct file * filp,
 			writel(msg, kvm_ivshmem_dev.regs + Doorbell);
 			break;
 		default:
-			printk("KVM_IVSHMEM: bad ioctl (\n");
+			printk("KVM_IVSHMEM: bad ioctl %d\n", cmd);
 	}
 #endif
 
@@ -162,6 +165,7 @@ static ssize_t kvm_ivshmem_read(struct file * filp, char * buffer, size_t len,
 	int bytes_read = 0;
 	unsigned long offset;
 
+        printk(KERN_ERR "KVM_IVSHMEM: kvm_ivshmem_read \n");
 	offset = *poffset;
 
 	if (!kvm_ivshmem_dev.base_addr) {
@@ -188,6 +192,7 @@ static loff_t kvm_ivshmem_lseek(struct file * filp, loff_t offset, int origin)
 {
 
 	loff_t retval = -1;
+        printk(KERN_ERR "KVM_IVSHMEM: kvm_ivshmem_lseek \n");
 
 	switch (origin) {
 		case 1:
@@ -209,6 +214,7 @@ static ssize_t kvm_ivshmem_write(struct file * filp, const char * buffer,
 
 	int bytes_written = 0;
 	unsigned long offset;
+        printk(KERN_ERR "KVM_IVSHMEM: kvm_ivshmem_write \n");
 
 	offset = *poffset;
 
@@ -240,6 +246,7 @@ static irqreturn_t kvm_ivshmem_interrupt (int irq, void *dev_instance)
 {
 	struct kvm_ivshmem_device * dev = dev_instance;
 	u32 status;
+        printk(KERN_ERR "KVM_IVSHMEM: kvm_ivshmem_interrupt \n");
 
 	if (unlikely(dev == NULL))
 		return IRQ_NONE;
@@ -266,6 +273,7 @@ static int request_msix_vectors(struct kvm_ivshmem_device *ivs_info, int nvector
 {
 	int i, err;
 	const char *name = "ivshmem";
+        printk(KERN_ERR "KVM_IVSHMEM: request_msix_vectors \n");
 
 	printk(KERN_INFO "devname is %s\n", name);
 	ivs_info->nvectors = nvectors;
@@ -287,7 +295,7 @@ static int request_msix_vectors(struct kvm_ivshmem_device *ivs_info, int nvector
 	}
 
 	if (err) {
-		printk(KERN_INFO "some error below zero %d\n", err);
+		printk(KERN_INFO "some error below zero %d, disabling MSI\n", err);
 		return err;
 	}
 
@@ -314,9 +322,10 @@ static int kvm_ivshmem_probe_device (struct pci_dev *pdev,
 
 	int result;
 
+        printk(KERN_ERR "KVM_IVSHMEM: kvm_ivshmem_probe_device \n");
 	printk("KVM_IVSHMEM: Probing for KVM_IVSHMEM Device\n");
 
-	result = pci_enable_device(pdev);
+	result = pci_enable_device(pdev); /**/
 	if (result) {
 		printk(KERN_ERR "Cannot probe KVM_IVSHMEM device %s: error %d\n",
 		pci_name(pdev), result);
@@ -403,9 +412,20 @@ static void kvm_ivshmem_remove_device(struct pci_dev* pdev)
 
 }
 
+#define DO_HECK 1
+static char *pch = NULL;
+static char mych[1024];
+
 static void __exit kvm_ivshmem_cleanup_module (void)
 {
-	pci_unregister_driver (&kvm_ivshmem_pci_driver);
+        printk(KERN_ERR "KVM_IVSHMEM: kvm_ivshmem_cleanup_module \n");
+        
+        if (DO_HECK) {
+            iounmap(pch);
+            return;
+        }
+	
+        pci_unregister_driver (&kvm_ivshmem_pci_driver);
 	unregister_chrdev(device_major_nr, "kvm_ivshmem");
 }
 
@@ -413,6 +433,24 @@ static int __init kvm_ivshmem_init_module (void)
 {
 
 	int err = -ENOMEM;
+        printk(KERN_ERR "KVM_IVSHMEM: kvm_ivshmem_init_module \n");
+        
+
+        if (DO_HECK) {
+            pch = ioremap(0xfe000000, 1024*1024);
+        printk(KERN_ERR "KVM_IVSHMEM: pch=%p\n", pch);
+            if (!pch) return 0;
+            snprintf(mych, 100, "some_TEST\n");
+        printk(KERN_ERR "KVM_IVSHMEM: AA %s\n", pch);
+        printk(KERN_ERR "KVM_IVSHMEM: mych %s\n", mych);
+            memcpy(pch, mych, 1024);
+        printk(KERN_ERR "KVM_IVSHMEM: BB %s\n", pch);
+            
+            //pch[1024*1020-1] = 'x';
+            
+            
+            return 0;
+        }
 
 	/* Register device node ops. */
 	err = register_chrdev(0, "kvm_ivshmem", &kvm_ivshmem_ops);
@@ -429,6 +467,8 @@ static int __init kvm_ivshmem_init_module (void)
 		goto error;
 	}
 
+        //snprintf((char*)kvm_ivshmem_dev.base_addr, 100, "THE-test\n");
+
 	return 0;
 
 error:
@@ -439,6 +479,7 @@ error:
 
 static int kvm_ivshmem_open(struct inode * inode, struct file * filp)
 {
+    printk(KERN_ERR "KVM_IVSHMEM: kvm_ivshmem_open \n");
 
    printk(KERN_INFO "Opening kvm_ivshmem device\n");
 
@@ -452,6 +493,7 @@ static int kvm_ivshmem_open(struct inode * inode, struct file * filp)
 
 static int kvm_ivshmem_release(struct inode * inode, struct file * filp)
 {
+    printk(KERN_ERR "KVM_IVSHMEM: kvm_ivshmem_release \n");
 
    return 0;
 }
@@ -462,8 +504,9 @@ static int kvm_ivshmem_mmap(struct file *filp, struct vm_area_struct * vma)
 	unsigned long len;
 	unsigned long off;
 	unsigned long start;
+    printk(KERN_ERR "KVM_IVSHMEM: kvm_ivshmem_mmap \n");
 
-	lock_kernel();
+	// lock_kernel();
 
 	off = vma->vm_pgoff << PAGE_SHIFT;
 	start = kvm_ivshmem_dev.ioaddr;
@@ -475,24 +518,24 @@ static int kvm_ivshmem_mmap(struct file *filp, struct vm_area_struct * vma)
 	printk(KERN_INFO "%lu > %lu\n",(vma->vm_end - vma->vm_start + off), len);
 
 	if ((vma->vm_end - vma->vm_start + off) > len) {
-		unlock_kernel();
+		// unlock_kernel();
 		return -EINVAL;
 	}
 
 	off += start;
 	vma->vm_pgoff = off >> PAGE_SHIFT;
 
-	vma->vm_flags |= VM_SHARED|VM_RESERVED;
+	vma->vm_flags |= VM_SHARED|(VM_DONTEXPAND | VM_DONTDUMP);
 
 	if(io_remap_pfn_range(vma, vma->vm_start,
 		off >> PAGE_SHIFT, vma->vm_end - vma->vm_start,
 		vma->vm_page_prot))
 	{
 		printk("mmap failed\n");
-		unlock_kernel();
+		// unlock_kernel();
 		return -ENXIO;
 	}
-	unlock_kernel();
+	// unlock_kernel();
 
 	return 0;
 }
